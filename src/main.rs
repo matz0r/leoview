@@ -1,3 +1,6 @@
+// Release builds on Windows are GUI apps: don't open a console window next to the viewer.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod layout;
 mod loader;

@@ -41,6 +41,8 @@ pub struct LeoView {
     logo: TextureHandle,
     current_dir: PathBuf,
     subdirs: Vec<PathBuf>,
+    /// Drive roots (Windows only, empty elsewhere).
+    drives: Vec<PathBuf>,
     images: Vec<PathBuf>,
     /// `Some` = single image view, `None` = directory (thumbnail grid) view.
     selected: Option<usize>,
@@ -83,6 +85,7 @@ impl LeoView {
             logo,
             current_dir: PathBuf::new(),
             subdirs: Vec::new(),
+            drives: list_drives(),
             images: Vec::new(),
             selected: None,
             thumb_size: 160.0,
@@ -97,7 +100,8 @@ impl LeoView {
         };
 
         let start = start
-            .and_then(|p| p.canonicalize().ok())
+            // `dunce` avoids Windows `\\?\` verbatim paths, which would show up in the UI.
+            .and_then(|p| dunce::canonicalize(p).ok())
             .unwrap_or_else(default_dir);
         if start.is_file() {
             let dir = start
@@ -126,10 +130,10 @@ impl LeoView {
         match std::fs::read_dir(&dir) {
             Ok(entries) => {
                 for entry in entries.flatten() {
-                    let path = entry.path();
-                    if is_hidden(&path) {
+                    if is_hidden(&entry) {
                         continue;
                     }
+                    let path = entry.path();
                     if path.is_dir() {
                         self.subdirs.push(path);
                     } else if is_image(&path) {
@@ -461,9 +465,26 @@ impl LeoView {
                 }
                 if icon_button(ui, "🏠", true, "Home").clicked() {
                     target = Some(default_dir());
+                    self.drives = list_drives();
                 }
             });
         });
+        if !self.drives.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for drive in &self.drives {
+                    let label = drive.display().to_string();
+                    let current = self.current_dir.starts_with(drive);
+                    if ui
+                        .selectable_label(current, label.trim_end_matches('\\'))
+                        .on_hover_text(format!("Open drive {label}"))
+                        .clicked()
+                    {
+                        target = Some(drive.clone());
+                    }
+                }
+            });
+        }
         ui.add_space(2.0);
         ui.label(RichText::new(file_name(&self.current_dir)).strong())
             .on_hover_text(self.current_dir.display().to_string());
@@ -869,18 +890,50 @@ fn count_label(n: usize, noun: &str) -> String {
 }
 
 fn default_dir() -> PathBuf {
+    // The platform's pictures folder: XDG on Linux, the (possibly redirected) known folder on Windows.
     let home = std::env::home_dir();
-    home.as_ref()
-        .map(|h| h.join("Pictures"))
+    dirs::picture_dir()
+        .or_else(|| home.as_ref().map(|h| h.join("Pictures")))
         .filter(|p| p.is_dir())
         .or(home)
         .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .unwrap_or_else(|| PathBuf::from(std::path::MAIN_SEPARATOR_STR))
 }
 
-fn is_hidden(path: &Path) -> bool {
-    path.file_name()
-        .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+/// Dotfiles everywhere, plus entries with the hidden or system attribute on Windows
+/// (e.g. `$RECYCLE.BIN`, `System Volume Information`).
+fn is_hidden(entry: &std::fs::DirEntry) -> bool {
+    if entry.file_name().to_string_lossy().starts_with('.') {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM,
+        };
+        // On Windows this comes from the directory listing itself, so it is cheap.
+        if let Ok(meta) = entry.metadata() {
+            return meta.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0;
+        }
+    }
+    false
+}
+
+/// Drive roots like `C:\`, so the browser can leave the drive it started on.
+#[cfg(windows)]
+fn list_drives() -> Vec<PathBuf> {
+    // SAFETY: takes no arguments and only returns a bitmask.
+    let mask = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+    (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| PathBuf::from(format!("{}:\\", (b'A' + i) as char)))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn list_drives() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 fn is_image(path: &Path) -> bool {

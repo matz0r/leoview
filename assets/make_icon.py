@@ -198,4 +198,8 @@ if __name__ == "__main__":
     write_svg()
     for size in (256, 512):
         render_png(size).save(OUT / f"icon-{size}.png")
+    # Multi-size icon embedded into the Windows executable (see build.rs).
+    ico_sizes = (16, 24, 32, 48, 64, 128, 256)
+    frames = [render_png(size) for size in ico_sizes]
+    frames[-1].save(OUT / "icon.ico", sizes=[(n, n) for n in ico_sizes], append_images=frames[:-1])
     print("wrote", OUT)
