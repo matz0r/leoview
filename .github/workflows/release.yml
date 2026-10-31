@@ -1,0 +1,76 @@
+name: Release
+
+# Push a tag like v0.1.0 to build a Linux binary and attach it to a GitHub
+# release. "Run workflow" (manual) with a tag creates that tag on the chosen
+# branch and releases it the same way; without a tag it only builds and
+# uploads the package as a workflow artifact.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create, e.g. v0.2.0 (empty: only build)"
+        required: false
+        default: ""
+
+env:
+  # The tag being released, empty for a build-only run
+  TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # Oldest available Ubuntu: the binary needs this glibc or newer
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }} && rustup default stable
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          version=${TAG#v}
+          [[ -n $TAG ]] || version=${GITHUB_SHA::7}
+          name=leoview-$version-${{ matrix.platform }}
+          mkdir -p "$name" dist
+          cp target/${{ matrix.target }}/release/leoview "$name"/
+          tar czf "dist/$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag' || inputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # --target creates the tag at the built commit if it doesn't exist yet
+        run: gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --target "$GITHUB_SHA"
