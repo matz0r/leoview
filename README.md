@@ -1,9 +1,10 @@
-<p align="center"><img src="assets/icon-256.png" alt="LeoView" height="100px"></p>
 
 # LeoView
 
 A fast, simple image viewer with a folder browser and thumbnail grid, in a
 single cross-platform binary.
+
+<p align="center"><img src="assets/screenshot.png" alt="LeoView" height="200px"></p>
 
 ## Download
 
