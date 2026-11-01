@@ -25,8 +25,8 @@ const GRID_SPACING: f32 = 8.0;
 const DEFAULT_ASPECT: f32 = 1.5;
 const THUMB_RADIUS: u8 = 6;
 const ICON_BUTTON: Vec2 = vec2(30.0, 26.0);
-/// Accumulated scroll distance that steps to the next/previous image.
-const SCROLL_STEP: f32 = 60.0;
+/// Touchpad scroll distance (points) that counts as one wheel notch.
+const SCROLL_STEP_POINTS: f32 = 60.0;
 /// How many images before/after the selected one are preloaded at full size.
 const PRELOAD_RADIUS: usize = 1;
 
@@ -284,12 +284,41 @@ impl LeoView {
         if !ui.rect_contains_pointer(rect) {
             return;
         }
-        let delta = ui.input(|i| i.smooth_scroll_delta);
-        self.scroll_accum += delta.y + delta.x;
-        if self.scroll_accum.abs() >= SCROLL_STEP {
-            let dir = if self.scroll_accum > 0.0 { -1 } else { 1 };
+        // Raw wheel events, not egui's smoothed scroll delta: that spreads a
+        // notch over several frames and is in points (40 per notch), which
+        // made single notches get lost. Counted in notches (lines).
+        let notches: f32 = ui.input(|i| {
+            i.events
+                .iter()
+                .map(|e| match e {
+                    egui::Event::MouseWheel { unit, delta, .. } => {
+                        let d = delta.x + delta.y;
+                        match unit {
+                            egui::MouseWheelUnit::Point => d / SCROLL_STEP_POINTS,
+                            egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => d,
+                        }
+                    }
+                    _ => 0.0,
+                })
+                .sum()
+        });
+        if notches == 0.0 {
+            return;
+        }
+        // Reversing direction drops the leftover from the other way.
+        if notches.signum() != self.scroll_accum.signum() {
             self.scroll_accum = 0.0;
-            self.step(dir);
+        }
+        self.scroll_accum += notches;
+        // Positive = content moves down = wheel up = previous image.
+        let steps = self.scroll_accum.trunc();
+        if steps != 0.0 {
+            let leftover = self.scroll_accum - steps;
+            // Each notch is one image, also for fast spins; the leftover
+            // fraction (high-resolution wheels, touchpads) carries over.
+            // Set after stepping: selecting an image resets the accumulator.
+            self.step(-(steps as isize));
+            self.scroll_accum = leftover;
         }
     }
 

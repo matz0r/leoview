@@ -49,8 +49,8 @@ It stays hidden when the same build or a newer version is already installed.
 
 | Key / action                | In the image view   | In the grid    |
 |-----------------------------|---------------------|----------------|
-| → / Space / scroll down     | next image          |                |
-| ← / scroll up               | previous image      |                |
+| → / Space / mouse wheel down | next image          |                |
+| ← / mouse wheel up         | previous image      |                |
 | Home / End                  | first / last image  |                |
 | Esc / Backspace / double-click | back to the grid |                |
 | Backspace                   |                     | parent folder  |
