@@ -19,8 +19,7 @@ start ("More info" → "Run anyway").
 
 Click **Install** in the toolbar to keep it: it copies itself to
 `%LOCALAPPDATA%\Programs\LeoView\`, adds it to the Start menu and restarts from
-there. After that you can delete the download. To update, start the new
-download and click **Install** again.
+there. After that you can delete the download.
 
 ## Linux
 
@@ -36,6 +35,18 @@ On both platforms, **Install** appears when this binary is not installed,
 when it is newer, or when it is a different build of the same version.
 It stays hidden when the same build or a newer version is already installed.
 `leoview --install` does the same from the command line.
+
+### Updates
+
+The installed copy has **Check for updates once a day** in the **About**
+window, off by default. Turn it on and it checks GitHub for a newer release
+right away; after that it checks when LeoView starts, at most once every 24
+hours. If there is a newer version, **Update to x.y.z** appears in the
+toolbar: it downloads that release, installs it and reopens at the same folder
+or image. Nothing is downloaded or installed without that click, and with the
+setting off no update check is made. `leoview --update` updates from the
+command line in any case. Versions up to 0.2.1 don't have the setting yet:
+install the new download once.
 
 ## Usage
 
@@ -62,7 +73,18 @@ Supported formats: JPEG, PNG, GIF, BMP, WebP, TIFF, ICO, TGA, QOI, PNM.
 ```bash
 cargo build --release   # -> target/release/leoview
 cargo test
+cargo test -- --ignored   # downloads the latest release, installs nothing
 ```
+
+The update check (`src/update.rs`) requests
+`https://github.com/matz0r/leoview/releases/latest` without following the
+redirect and reads the version from the `Location` header, so neither the
+rate-limited API nor JSON is needed. The update downloads
+`leoview-X.Y.Z-<platform>.(tar.gz|zip)`, unpacks the binary into a temp
+folder, checks its `--version` and runs it with `--install`; the release asset
+names in `release.yml` must keep this pattern. The setting, the time of the
+last successful check and the newest version found are kept in
+`<config dir>/leoview/update`.
 
 The binary needs the glibc of the build machine or newer.
 

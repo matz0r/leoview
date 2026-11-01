@@ -55,7 +55,17 @@ pub struct LeoView {
     show_sidebar: bool,
     /// Show the Install button (running from a download, not the installed copy).
     offer_install: bool,
-    install_error: Option<String>,
+    /// Error window: title and message (failed Install or Update).
+    error: Option<(&'static str, String)>,
+    /// Running from the installed copy: the only one that offers updates.
+    #[cfg(any(target_os = "linux", windows))]
+    update_eligible: bool,
+    #[cfg(any(target_os = "linux", windows))]
+    update: crate::update::Settings,
+    #[cfg(any(target_os = "linux", windows))]
+    updating: bool,
+    #[cfg(any(target_os = "linux", windows))]
+    update_rx: Option<std::sync::mpsc::Receiver<crate::update::Msg>>,
     scroll_accum: f32,
     /// Horizontal center of the image area last frame, to align the toolbar arrows.
     viewer_center_x: Option<f32>,
@@ -85,6 +95,16 @@ impl LeoView {
             },
         );
 
+        #[cfg(any(target_os = "linux", windows))]
+        let update_eligible = crate::update::eligible();
+        // A downloaded copy neither reads nor changes the update settings.
+        #[cfg(any(target_os = "linux", windows))]
+        let update = if update_eligible {
+            crate::update::Settings::load()
+        } else {
+            Default::default()
+        };
+
         let mut app = Self {
             loader: Loader::new(&cc.egui_ctx),
             logo,
@@ -103,7 +123,19 @@ impl LeoView {
             offer_install: crate::install::available(),
             #[cfg(not(any(target_os = "linux", windows)))]
             offer_install: false,
-            install_error: None,
+            error: None,
+            // Checked at start, at most once per day.
+            #[cfg(any(target_os = "linux", windows))]
+            update_rx: (update_eligible
+                && update.check
+                && crate::update::due(update.last_check, crate::update::now()))
+            .then(|| crate::update::check(&cc.egui_ctx)),
+            #[cfg(any(target_os = "linux", windows))]
+            update_eligible,
+            #[cfg(any(target_os = "linux", windows))]
+            update,
+            #[cfg(any(target_os = "linux", windows))]
+            updating: false,
             scroll_accum: 0.0,
             viewer_center_x: None,
             aspects: Vec::new(),
@@ -471,6 +503,18 @@ impl LeoView {
                     if ui.button("⬇  Install").on_hover_text(tooltip).clicked() {
                         self.install(ui.ctx());
                     }
+                }
+                #[cfg(any(target_os = "linux", windows))]
+                if self.updating {
+                    ui.label(RichText::new("Updating…").weak());
+                    ui.spinner();
+                } else if let Some(version) = self.update.offered().cloned()
+                    && ui
+                        .add(egui::Button::new(format!("⬆  Update to {version}")).selected(true))
+                        .on_hover_text("Download it from GitHub, install it and restart")
+                        .clicked()
+                {
+                    self.start_update(ui.ctx(), version);
                 }
                 ui.separator();
                 egui::widgets::global_theme_preference_buttons(ui);
@@ -844,25 +888,96 @@ impl LeoView {
         }
     }
 
-    /// Installs, then continues in the installed copy at the same folder/image.
+    /// The folder or image the installed copy should open after Install/Update.
     #[cfg(any(target_os = "linux", windows))]
-    fn install(&mut self, ctx: &egui::Context) {
-        let open = match self.selected {
+    fn open_path(&self) -> PathBuf {
+        match self.selected {
             Some(i) => self.images[i].clone(),
             None => self.current_dir.clone(),
-        };
-        match crate::install::install().and_then(|t| crate::install::launch(&t, &open)) {
-            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            Err(e) => self.install_error = Some(e),
         }
     }
 
-    fn install_error_window(&mut self, ctx: &egui::Context) {
-        let Some(error) = &self.install_error else {
+    /// Installs, then continues in the installed copy at the same folder/image.
+    #[cfg(any(target_os = "linux", windows))]
+    fn install(&mut self, ctx: &egui::Context) {
+        let open = self.open_path();
+        match crate::install::install().and_then(|t| crate::install::launch(&t, &open)) {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(e) => self.error = Some(("Install failed", e)),
+        }
+    }
+
+    /// Downloads and installs `version` in the background.
+    #[cfg(any(target_os = "linux", windows))]
+    fn start_update(&mut self, ctx: &egui::Context, version: semver::Version) {
+        self.updating = true;
+        self.update_rx = Some(crate::update::install(ctx, version, self.open_path()));
+    }
+
+    /// Handles the result of an update check or installation.
+    #[cfg(any(target_os = "linux", windows))]
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        use crate::update::Msg;
+        let Some(msg) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
+        };
+        self.update_rx = None;
+        match msg {
+            Msg::Checked(latest) => {
+                self.update.last_check = crate::update::now();
+                self.update.latest = latest;
+                self.update.save();
+            }
+            // The installed copy opens its own window.
+            Msg::Installed => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Msg::Failed(e) => {
+                self.updating = false;
+                self.error = Some(("Update failed", e));
+            }
+        }
+    }
+
+    /// "Check for updates" switch in the About window (installed copy only).
+    #[cfg(any(target_os = "linux", windows))]
+    fn update_settings(&mut self, ui: &mut Ui) {
+        if !self.update_eligible {
+            return;
+        }
+        ui.separator();
+        let changed = ui
+            .checkbox(&mut self.update.check, "Check for updates once a day")
+            .on_hover_text(
+                "Looks for a new version on GitHub when LeoView starts. \
+                 Nothing is installed without your click.",
+            )
+            .changed();
+        if changed {
+            self.update.save();
+            // Turning it on checks right away; off cancels a running check.
+            self.update_rx =
+                (self.update.check && !self.updating).then(|| crate::update::check(ui.ctx()));
+        }
+        if !self.update.check || self.updating {
+            return;
+        }
+        if self.update_rx.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Checking…").weak());
+            });
+        } else if let Some(version) = self.update.offered() {
+            ui.label(format!("Version {version} is available."));
+        } else if self.update.last_check > 0 {
+            ui.label(RichText::new("LeoView is up to date.").weak());
+        }
+    }
+
+    fn error_window(&mut self, ctx: &egui::Context) {
+        let Some((title, error)) = &self.error else {
             return;
         };
         let mut open = true;
-        egui::Window::new("Install failed")
+        egui::Window::new(*title)
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -871,14 +986,15 @@ impl LeoView {
                 ui.label(error);
             });
         if !open {
-            self.install_error = None;
+            self.error = None;
         }
     }
 
     fn about_window(&mut self, ctx: &egui::Context) {
         let logo = self.logo.clone();
+        let mut show = self.show_about;
         egui::Window::new("About")
-            .open(&mut self.show_about)
+            .open(&mut show)
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
@@ -896,8 +1012,11 @@ impl LeoView {
                     ui.add_space(6.0);
                     ui.label("A simple image viewer written in Rust with egui.");
                     ui.add_space(4.0);
+                    #[cfg(any(target_os = "linux", windows))]
+                    self.update_settings(ui);
                 });
             });
+        self.show_about &= show;
     }
 }
 
@@ -906,6 +1025,8 @@ impl eframe::App for LeoView {
         let ctx = ui.ctx().clone();
         self.poll_loader(&ctx);
         self.handle_keys(&ctx);
+        #[cfg(any(target_os = "linux", windows))]
+        self.poll_update(&ctx);
 
         let style = ui.style().clone();
         let panel = Frame::side_top_panel(&style);
@@ -943,7 +1064,7 @@ impl eframe::App for LeoView {
         self.viewer_center_x = Some(central.response.rect.center().x);
 
         self.about_window(&ctx);
-        self.install_error_window(&ctx);
+        self.error_window(&ctx);
         self.take_screenshot_when_ready(&ctx);
     }
 }

@@ -20,6 +20,19 @@ pub fn has_installed_copy() -> bool {
     platform::exe_path().is_ok_and(|p| p.is_file())
 }
 
+/// Path of the installed copy (it may not exist yet).
+pub fn installed_exe() -> Result<PathBuf, String> {
+    platform::exe_path()
+}
+
+/// Running from the installed location (the only copy that updates itself).
+pub fn is_installed_copy() -> bool {
+    let (Ok(target), Ok(exe)) = (platform::exe_path(), std::env::current_exe()) else {
+        return false;
+    };
+    target.is_file() && std::fs::canonicalize(exe).ok() == std::fs::canonicalize(target).ok()
+}
+
 /// Whether to offer the Install button: not installed yet, menu entry missing,
 /// or this binary is a newer version / a different build of the same version.
 pub fn available() -> bool {

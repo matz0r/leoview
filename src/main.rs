@@ -6,6 +6,8 @@ mod app;
 mod install;
 mod layout;
 mod loader;
+#[cfg(any(target_os = "linux", windows))]
+mod update;
 
 use std::path::PathBuf;
 
@@ -21,6 +23,18 @@ fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--install") {
         match install::install() {
             Ok(target) => println!("Installed {}", target.display()),
+            Err(e) => {
+                eprintln!("leoview: {e}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+    #[cfg(any(target_os = "linux", windows))]
+    if std::env::args().any(|a| a == "--update") {
+        match update::update_now() {
+            Ok(Some(version)) => println!("Updated to {version}"),
+            Ok(None) => println!("{} is up to date", env!("CARGO_PKG_VERSION")),
             Err(e) => {
                 eprintln!("leoview: {e}");
                 std::process::exit(1);

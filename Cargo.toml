@@ -1,6 +1,6 @@
 [package]
 name = "leoview"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -10,8 +10,20 @@ eframe = "0.37"
 image = "0.25"
 semver = "1"
 
+# Update check and download from GitHub releases (installed copy only).
+# rustls with bundled roots: no OpenSSL needed at runtime.
+[target.'cfg(target_os = "linux")'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Unpacks the .tar.gz release for the update
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4.46", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+# Update download through the system TLS (SChannel) and certificate store
+ureq = { version = "3", default-features = false, features = ["native-tls-no-default"] }
+# Unpacks the .zip release for the update
+zip = { version = "9.2.1", default-features = false, features = ["deflate-flate2"] }
 
 [build-dependencies]
 winresource = "0.1"
