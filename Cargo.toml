@@ -1,6 +1,6 @@
 [package]
 name = "leoview"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -8,6 +8,7 @@ dirs = "6"
 dunce = "1"
 eframe = "0.37"
 image = "0.25"
+semver = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

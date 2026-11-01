@@ -51,6 +51,11 @@ pub struct LeoView {
     fulls: HashMap<PathBuf, Tex>,
     dir_error: Option<String>,
     show_about: bool,
+    /// Folder sidebar visible (toggled by the toolbar button).
+    show_sidebar: bool,
+    /// Show the Install button (running from a download, not the installed copy).
+    offer_install: bool,
+    install_error: Option<String>,
     scroll_accum: f32,
     /// Horizontal center of the image area last frame, to align the toolbar arrows.
     viewer_center_x: Option<f32>,
@@ -93,6 +98,12 @@ impl LeoView {
             fulls: HashMap::new(),
             dir_error: None,
             show_about: false,
+            show_sidebar: true,
+            #[cfg(any(target_os = "linux", windows))]
+            offer_install: crate::install::available(),
+            #[cfg(not(any(target_os = "linux", windows)))]
+            offer_install: false,
+            install_error: None,
             scroll_accum: 0.0,
             viewer_center_x: None,
             aspects: Vec::new(),
@@ -396,6 +407,8 @@ impl LeoView {
                         .corner_radius(5),
                 );
                 ui.label(RichText::new("LeoView").strong().size(15.0));
+                ui.separator();
+                self.sidebar_toggle(ui);
                 if self.selected.is_none() {
                     ui.add_space(4.0);
                     ui.separator();
@@ -417,6 +430,18 @@ impl LeoView {
             |ui| {
                 if ui.button("ℹ  About").clicked() {
                     self.show_about = true;
+                }
+                #[cfg(any(target_os = "linux", windows))]
+                if self.offer_install {
+                    let tooltip = if crate::install::has_installed_copy() {
+                        "Replace the installed copy with this version"
+                    } else {
+                        "Install in your user folder and application menu, \
+                         so you can delete this download"
+                    };
+                    if ui.button("⬇  Install").on_hover_text(tooltip).clicked() {
+                        self.install(ui.ctx());
+                    }
                 }
                 ui.separator();
                 egui::widgets::global_theme_preference_buttons(ui);
@@ -451,6 +476,48 @@ impl LeoView {
                 ui.add(egui::Label::new(job).truncate());
             },
         );
+    }
+
+    /// Button that shows/hides the folder sidebar, drawn as a window with a
+    /// left panel (filled while the sidebar is shown).
+    fn sidebar_toggle(&mut self, ui: &mut Ui) {
+        let response = ui
+            .add(
+                egui::Button::new("")
+                    .min_size(ICON_BUTTON)
+                    .selected(self.show_sidebar),
+            )
+            .on_hover_text(if self.show_sidebar {
+                "Hide folders"
+            } else {
+                "Show folders"
+            });
+        if response.clicked() {
+            self.show_sidebar = !self.show_sidebar;
+        }
+        let color = if self.show_sidebar {
+            ui.visuals().selection.stroke.color
+        } else {
+            ui.style().interact(&response).fg_stroke.color
+        };
+        let frame = Rect::from_center_size(response.rect.center(), vec2(16.0, 13.0));
+        let painter = ui.painter();
+        painter.rect_stroke(frame, 2, Stroke::new(1.3, color), StrokeKind::Inside);
+        let strip = Rect::from_min_max(frame.min, pos2(frame.left() + 6.0, frame.bottom()));
+        if self.show_sidebar {
+            painter.rect_filled(
+                strip,
+                CornerRadius {
+                    nw: 2,
+                    sw: 2,
+                    ne: 0,
+                    se: 0,
+                },
+                color,
+            );
+        } else {
+            painter.vline(strip.right(), frame.y_range(), Stroke::new(1.3, color));
+        }
     }
 
     fn file_browser(&mut self, ui: &mut Ui) {
@@ -748,6 +815,37 @@ impl LeoView {
         }
     }
 
+    /// Installs, then continues in the installed copy at the same folder/image.
+    #[cfg(any(target_os = "linux", windows))]
+    fn install(&mut self, ctx: &egui::Context) {
+        let open = match self.selected {
+            Some(i) => self.images[i].clone(),
+            None => self.current_dir.clone(),
+        };
+        match crate::install::install().and_then(|t| crate::install::launch(&t, &open)) {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(e) => self.install_error = Some(e),
+        }
+    }
+
+    fn install_error_window(&mut self, ctx: &egui::Context) {
+        let Some(error) = &self.install_error else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new("Install failed")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(error);
+            });
+        if !open {
+            self.install_error = None;
+        }
+    }
+
     fn about_window(&mut self, ctx: &egui::Context) {
         let logo = self.logo.clone();
         egui::Window::new("About")
@@ -788,12 +886,14 @@ impl eframe::App for LeoView {
             .frame(panel.inner_margin(Margin::symmetric(12, 8)))
             .exact_size(TOOLBAR_HEIGHT)
             .show(ui, |ui| self.toolbar(ui));
-        egui::Panel::left("file_browser")
-            .frame(panel.inner_margin(Margin::same(12)))
-            .resizable(true)
-            .default_size(230.0)
-            .size_range(160.0..=480.0)
-            .show(ui, |ui| self.file_browser(ui));
+        if self.show_sidebar {
+            egui::Panel::left("file_browser")
+                .frame(panel.inner_margin(Margin::same(12)))
+                .resizable(true)
+                .default_size(230.0)
+                .size_range(160.0..=480.0)
+                .show(ui, |ui| self.file_browser(ui));
+        }
         if let Some(selected) = self.selected {
             egui::Panel::bottom("filmstrip")
                 .frame(panel.inner_margin(Margin::symmetric(12, 10)))
@@ -814,6 +914,7 @@ impl eframe::App for LeoView {
         self.viewer_center_x = Some(central.response.rect.center().x);
 
         self.about_window(&ctx);
+        self.install_error_window(&ctx);
         self.take_screenshot_when_ready(&ctx);
     }
 }
