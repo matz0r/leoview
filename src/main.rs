@@ -8,6 +8,8 @@ mod layout;
 mod loader;
 #[cfg(any(target_os = "linux", windows))]
 mod update;
+#[cfg(target_os = "linux")]
+mod xpaint;
 
 use std::path::PathBuf;
 

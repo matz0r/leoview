@@ -13,11 +13,26 @@ use crate::layout::justify;
 use crate::loader::{Kind, Loader, THUMB_MAX};
 
 pub const ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
+/// Logo of xpaint, shown on the "Edit in xpaint" button.
+#[cfg(target_os = "linux")]
+const XPAINT_ICON_PNG: &[u8] = include_bytes!("../assets/xpaint-icon.png");
+
+// Toolbar icons: white line drawings (shared with xpaint), tinted when painted.
+const ABOUT_ICON: egui::ImageSource = egui::include_image!("../assets/icons/about.svg");
+const DELETE_ICON: egui::ImageSource = egui::include_image!("../assets/icons/delete.svg");
+const SETTINGS_ICON: egui::ImageSource = egui::include_image!("../assets/icons/settings.svg");
+#[cfg(any(target_os = "linux", windows))]
+const INSTALL_ICON: egui::ImageSource = egui::include_image!("../assets/icons/install.svg");
+const THEME_SYSTEM_ICON: egui::ImageSource =
+    egui::include_image!("../assets/icons/theme-system.svg");
+const THEME_DARK_ICON: egui::ImageSource = egui::include_image!("../assets/icons/theme-dark.svg");
+const THEME_LIGHT_ICON: egui::ImageSource = egui::include_image!("../assets/icons/theme-light.svg");
 
 const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "ico", "tga", "qoi", "pnm", "pbm",
     "pgm", "ppm",
 ];
+// Sizes at the Normal icon size; the icon size setting scales them (see `icon_scale`).
 const TOOLBAR_HEIGHT: f32 = 42.0;
 const FILMSTRIP_HEIGHT: f32 = 92.0;
 const GRID_SPACING: f32 = 8.0;
@@ -25,10 +40,45 @@ const GRID_SPACING: f32 = 8.0;
 const DEFAULT_ASPECT: f32 = 1.5;
 const THUMB_RADIUS: u8 = 6;
 const ICON_BUTTON: Vec2 = vec2(30.0, 26.0);
+/// Storage key of the icon size setting (the same as xpaint's).
+const ICON_SIZE_KEY: &str = "icon_size";
 /// Touchpad scroll distance (points) that counts as one wheel notch.
 const SCROLL_STEP_POINTS: f32 = 60.0;
 /// How many images before/after the selected one are preloaded at full size.
 const PRELOAD_RADIUS: usize = 1;
+
+/// How large the toolbar icons are drawn, together with their buttons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum IconSize {
+    #[default]
+    Normal,
+    Large,
+    Larger,
+}
+
+impl IconSize {
+    const ALL: [IconSize; 3] = [IconSize::Normal, IconSize::Large, IconSize::Larger];
+
+    fn name(self) -> &'static str {
+        match self {
+            IconSize::Normal => "Normal",
+            IconSize::Large => "Large",
+            IconSize::Larger => "Larger",
+        }
+    }
+
+    fn scale(self) -> f32 {
+        match self {
+            IconSize::Normal => 1.0,
+            IconSize::Large => 1.25,
+            IconSize::Larger => 1.5,
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|size| size.name() == name)
+    }
+}
 
 enum Tex {
     Loading,
@@ -39,6 +89,8 @@ enum Tex {
 pub struct LeoView {
     loader: Loader,
     logo: TextureHandle,
+    #[cfg(target_os = "linux")]
+    xpaint_logo: TextureHandle,
     current_dir: PathBuf,
     subdirs: Vec<PathBuf>,
     /// Drive roots (Windows only, empty elsewhere).
@@ -71,6 +123,7 @@ pub struct LeoView {
     viewer_center_x: Option<f32>,
     /// Aspect ratio (width / height) per image, 0.0 while unknown.
     aspects: Vec<f32>,
+    icon_size: IconSize,
     /// Dev aid: `LEOVIEW_SCREENSHOT=out.png` saves the app's own frame and quits.
     screenshot_to: Option<PathBuf>,
 }
@@ -78,22 +131,11 @@ pub struct LeoView {
 impl LeoView {
     pub fn new(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>) -> Self {
         setup_style(&cc.egui_ctx);
+        egui_extras::install_image_loaders(&cc.egui_ctx);
 
-        let logo = image::load_from_memory(ICON_PNG)
-            .expect("embedded icon is a valid PNG")
-            .to_rgba8();
-        let logo = ColorImage::from_rgba_unmultiplied(
-            [logo.width() as usize, logo.height() as usize],
-            logo.as_raw(),
-        );
-        let logo = cc.egui_ctx.load_texture(
-            "logo",
-            logo,
-            TextureOptions {
-                mipmap_mode: Some(egui::TextureFilter::Linear),
-                ..TextureOptions::LINEAR
-            },
-        );
+        let logo = load_logo(&cc.egui_ctx, "logo", ICON_PNG);
+        #[cfg(target_os = "linux")]
+        let xpaint_logo = load_logo(&cc.egui_ctx, "xpaint-logo", XPAINT_ICON_PNG);
 
         #[cfg(any(target_os = "linux", windows))]
         let update_eligible = crate::update::eligible();
@@ -108,6 +150,8 @@ impl LeoView {
         let mut app = Self {
             loader: Loader::new(&cc.egui_ctx),
             logo,
+            #[cfg(target_os = "linux")]
+            xpaint_logo,
             current_dir: PathBuf::new(),
             subdirs: Vec::new(),
             drives: list_drives(),
@@ -139,6 +183,11 @@ impl LeoView {
             scroll_accum: 0.0,
             viewer_center_x: None,
             aspects: Vec::new(),
+            icon_size: cc
+                .storage
+                .and_then(|s| s.get_string(ICON_SIZE_KEY))
+                .and_then(|name| IconSize::from_name(&name))
+                .unwrap_or_default(),
             screenshot_to: std::env::var_os("LEOVIEW_SCREENSHOT").map(PathBuf::from),
         };
 
@@ -224,6 +273,30 @@ impl LeoView {
         }
     }
 
+    /// Move to the OS trash; keep the selection intact if that fails.
+    fn delete_selected(&mut self) {
+        let Some(index) = self.selected else { return };
+        let path = self.images[index].clone();
+        if let Err(error) = trash::delete(&path) {
+            self.error = Some((
+                "Can't move image to recycle bin",
+                format!("{}\n{error}", path.display()),
+            ));
+            return;
+        }
+        self.images.remove(index);
+        self.aspects.remove(index);
+        self.thumbs.remove(&path);
+        self.fulls.remove(&path);
+        // Aspect results use indices, so invalidate results from before the removal.
+        self.loader.scan_aspects(self.images.clone());
+        self.select(if self.images.is_empty() {
+            None
+        } else {
+            Some(index.min(self.images.len() - 1))
+        });
+    }
+
     /// Moves the selection by `delta` images, clamped to the list.
     fn step(&mut self, delta: isize) {
         if let Some(i) = self.selected {
@@ -284,6 +357,25 @@ impl LeoView {
     fn handle_keys(&mut self, ctx: &egui::Context) {
         // Don't steal keys from a focused widget (e.g. the slider).
         if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        if !self.show_about
+            && self.error.is_none()
+            && ctx.input(|i| {
+                i.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: Key::Delete,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        }
+                    )
+                })
+            })
+        {
+            self.delete_selected();
             return;
         }
         let pressed = |key| ctx.input(|i| i.key_pressed(key));
@@ -404,23 +496,21 @@ impl LeoView {
                     + 8.0,
             );
             let gap = ui.spacing().item_spacing.x;
-            let group_width = 2.0 * ICON_BUTTON.x + counter_width + 2.0 * gap;
+            let button = ICON_BUTTON * icon_scale(ui);
+            let group_width = 2.0 * button.x + counter_width + 2.0 * gap;
             let center_x = self.viewer_center_x.unwrap_or(rect.center().x);
             let group = Rect::from_center_size(
                 pos2(center_x, rect.center().y),
-                vec2(group_width, ICON_BUTTON.y),
+                vec2(group_width, button.y),
             );
 
-            let prev = Rect::from_min_size(group.min, ICON_BUTTON);
-            let next = Rect::from_min_size(
-                pos2(group.right() - ICON_BUTTON.x, group.top()),
-                ICON_BUTTON,
-            );
+            let prev = Rect::from_min_size(group.min, button);
+            let next = Rect::from_min_size(pos2(group.right() - button.x, group.top()), button);
             let counter_rect = Rect::from_min_max(
                 pos2(prev.right() + gap, group.top()),
                 pos2(next.left() - gap, group.bottom()),
             );
-            if put_enabled(ui, prev, i > 0, icon_button_widget("◀"))
+            if put_enabled(ui, prev, i > 0, icon_button_widget(ui, "◀"))
                 .on_hover_text("Previous (←)")
                 .clicked()
             {
@@ -430,9 +520,14 @@ impl LeoView {
                 counter_rect,
                 egui::Label::new(RichText::new(counter).weak()),
             );
-            if put_enabled(ui, next, i + 1 < self.images.len(), icon_button_widget("▶"))
-                .on_hover_text("Next (→)")
-                .clicked()
+            if put_enabled(
+                ui,
+                next,
+                i + 1 < self.images.len(),
+                icon_button_widget(ui, "▶"),
+            )
+            .on_hover_text("Next (→)")
+            .clicked()
             {
                 self.step(1);
             }
@@ -464,8 +559,8 @@ impl LeoView {
             |ui| {
                 ui.add(
                     egui::Image::from_texture(&self.logo)
-                        .fit_to_exact_size(Vec2::splat(24.0))
-                        .corner_radius(5),
+                        .fit_to_exact_size(Vec2::splat(24.0 * icon_scale(ui)))
+                        .corner_radius(5.0 * icon_scale(ui)),
                 );
                 ui.label(RichText::new("LeoView").strong().size(15.0));
                 ui.separator();
@@ -489,9 +584,13 @@ impl LeoView {
                 .max_rect(row(right_start, rect.right()))
                 .layout(Layout::right_to_left(Align::Center)),
             |ui| {
-                if ui.button("ℹ  About").clicked() {
+                if svg_button(ui, ABOUT_ICON, "About LeoView").clicked() {
                     self.show_about = true;
                 }
+                let settings = svg_button(ui, SETTINGS_ICON, "Settings");
+                egui::Popup::menu(&settings)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| self.settings_menu(ui));
                 #[cfg(any(target_os = "linux", windows))]
                 if self.offer_install {
                     let tooltip = if crate::install::has_installed_copy() {
@@ -517,7 +616,30 @@ impl LeoView {
                     self.start_update(ui.ctx(), version);
                 }
                 ui.separator();
-                egui::widgets::global_theme_preference_buttons(ui);
+                #[cfg(target_os = "linux")]
+                if let Some(i) = self.selected
+                    && let Some(binary) = crate::xpaint::installed()
+                {
+                    let scale = icon_scale(ui);
+                    let logo = egui::Image::from_texture(&self.xpaint_logo)
+                        .fit_to_exact_size(Vec2::splat(20.0 * scale))
+                        .corner_radius(4.0 * scale);
+                    if ui
+                        .add(egui::Button::image(logo).min_size(ICON_BUTTON * scale))
+                        .on_hover_text("Edit in xpaint")
+                        .clicked()
+                        && let Err(e) = crate::xpaint::open(&binary, &self.images[i])
+                    {
+                        self.error = Some(("Can't open xpaint", e));
+                    }
+                    ui.separator();
+                }
+                if self.selected.is_some()
+                    && svg_button(ui, DELETE_ICON, "Move to recycle bin (Del)").clicked()
+                {
+                    self.delete_selected();
+                }
+                theme_buttons(ui);
                 ui.separator();
 
                 let weak = ui.visuals().weak_text_color();
@@ -557,7 +679,7 @@ impl LeoView {
         let response = ui
             .add(
                 egui::Button::new("")
-                    .min_size(ICON_BUTTON)
+                    .min_size(ICON_BUTTON * icon_scale(ui))
                     .selected(self.show_sidebar),
             )
             .on_hover_text(if self.show_sidebar {
@@ -573,23 +695,25 @@ impl LeoView {
         } else {
             ui.style().interact(&response).fg_stroke.color
         };
-        let frame = Rect::from_center_size(response.rect.center(), vec2(16.0, 13.0));
+        let scale = icon_scale(ui);
+        let stroke = Stroke::new(1.3 * scale, color);
+        let frame = Rect::from_center_size(response.rect.center(), vec2(16.0, 13.0) * scale);
         let painter = ui.painter();
-        painter.rect_stroke(frame, 2, Stroke::new(1.3, color), StrokeKind::Inside);
-        let strip = Rect::from_min_max(frame.min, pos2(frame.left() + 6.0, frame.bottom()));
+        painter.rect_stroke(frame, 2.0 * scale, stroke, StrokeKind::Inside);
+        let strip = Rect::from_min_max(frame.min, pos2(frame.left() + 6.0 * scale, frame.bottom()));
         if self.show_sidebar {
             painter.rect_filled(
                 strip,
                 CornerRadius {
-                    nw: 2,
-                    sw: 2,
+                    nw: (2.0 * scale) as u8,
+                    sw: (2.0 * scale) as u8,
                     ne: 0,
                     se: 0,
                 },
                 color,
             );
         } else {
-            painter.vline(strip.right(), frame.y_range(), Stroke::new(1.3, color));
+            painter.vline(strip.right(), frame.y_range(), stroke);
         }
     }
 
@@ -937,13 +1061,63 @@ impl LeoView {
         }
     }
 
-    /// "Check for updates" switch in the About window (installed copy only).
+    /// The Settings menu: icon size, update check and desktop integration.
+    fn settings_menu(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Icon size").weak());
+        for size in IconSize::ALL {
+            let label = format!("{} ({:.0}%)", size.name(), size.scale() * 100.0);
+            ui.radio_value(&mut self.icon_size, size, label);
+        }
+        #[cfg(any(target_os = "linux", windows))]
+        self.platform_settings(ui);
+    }
+
+    /// Settings menu sections for the platforms with installation and updates.
+    #[cfg(any(target_os = "linux", windows))]
+    fn platform_settings(&mut self, ui: &mut Ui) {
+        ui.separator();
+        ui.label(RichText::new("Updates").weak());
+        if self.update_eligible {
+            self.update_settings(ui);
+        } else {
+            ui.label("Only the installed copy checks for updates.");
+        }
+
+        ui.separator();
+        ui.label(RichText::new("Desktop integration").weak());
+        let installed = crate::install::installed_exe().ok();
+        if self.offer_install {
+            let (label, tooltip) = if crate::install::has_installed_copy() {
+                (
+                    "Update installation",
+                    "Replace the installed copy with this version",
+                )
+            } else {
+                (
+                    "Install for this user",
+                    "Install in your user folder and application menu, \
+                     so you can delete this download",
+                )
+            };
+            let icon = egui::Image::new(INSTALL_ICON)
+                .tint(ui.visuals().text_color())
+                .fit_to_exact_size(Vec2::splat(16.0));
+            if ui
+                .add(egui::Button::image_and_text(icon, label))
+                .on_hover_text(tooltip)
+                .clicked()
+            {
+                self.install(ui.ctx());
+                ui.close();
+            }
+        } else if let Some(path) = installed {
+            ui.label(format!("Installed in {}", path.display()));
+        }
+    }
+
+    /// "Check for updates" switch and its status (installed copy only).
     #[cfg(any(target_os = "linux", windows))]
     fn update_settings(&mut self, ui: &mut Ui) {
-        if !self.update_eligible {
-            return;
-        }
-        ui.separator();
         let changed = ui
             .checkbox(&mut self.update.check, "Check for updates once a day")
             .on_hover_text(
@@ -1011,9 +1185,6 @@ impl LeoView {
                     ui.label(RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION"))).weak());
                     ui.add_space(6.0);
                     ui.label("A simple image viewer written in Rust with egui.");
-                    ui.add_space(4.0);
-                    #[cfg(any(target_os = "linux", windows))]
-                    self.update_settings(ui);
                 });
             });
         self.show_about &= show;
@@ -1021,8 +1192,13 @@ impl LeoView {
 }
 
 impl eframe::App for LeoView {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(ICON_SIZE_KEY, self.icon_size.name().to_owned());
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        set_icon_scale(&ctx, self.icon_size.scale());
         self.poll_loader(&ctx);
         self.handle_keys(&ctx);
         #[cfg(any(target_os = "linux", windows))]
@@ -1034,7 +1210,7 @@ impl eframe::App for LeoView {
 
         egui::Panel::top("toolbar")
             .frame(panel.inner_margin(Margin::symmetric(12, 8)))
-            .exact_size(TOOLBAR_HEIGHT)
+            .exact_size(TOOLBAR_HEIGHT * self.icon_size.scale())
             .show(ui, |ui| self.toolbar(ui));
         if self.show_sidebar {
             egui::Panel::left("file_browser")
@@ -1093,14 +1269,111 @@ fn setup_style(ctx: &egui::Context) {
     });
 }
 
-fn icon_button_widget(icon: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(icon).size(14.0)).min_size(ICON_BUTTON)
+/// A texture of an embedded PNG, smoothly scaled down for small sizes.
+fn load_logo(ctx: &egui::Context, name: &str, png: &[u8]) -> TextureHandle {
+    let logo = image::load_from_memory(png)
+        .expect("embedded icon is a valid PNG")
+        .to_rgba8();
+    let logo = ColorImage::from_rgba_unmultiplied(
+        [logo.width() as usize, logo.height() as usize],
+        logo.as_raw(),
+    );
+    ctx.load_texture(
+        name,
+        logo,
+        TextureOptions {
+            mipmap_mode: Some(egui::TextureFilter::Linear),
+            ..TextureOptions::LINEAR
+        },
+    )
+}
+
+fn icon_scale_id() -> egui::Id {
+    egui::Id::unique("leoview_icon_scale")
+}
+
+/// Makes the icon size setting's scale available to the icon helpers below. Set at
+/// the start of every frame.
+fn set_icon_scale(ctx: &egui::Context, scale: f32) {
+    ctx.data_mut(|d| d.insert_temp(icon_scale_id(), scale));
+}
+
+/// The factor icons and their buttons are scaled by, from the icon size setting.
+fn icon_scale(ui: &Ui) -> f32 {
+    ui.data(|d| d.get_temp(icon_scale_id())).unwrap_or(1.0)
+}
+
+fn icon_button_widget(ui: &Ui, icon: &str) -> egui::Button<'static> {
+    let scale = icon_scale(ui);
+    egui::Button::new(RichText::new(icon.to_owned()).size(14.0 * scale))
+        .min_size(ICON_BUTTON * scale)
+}
+
+/// A fixed-size button showing an SVG `icon`, tinted to the button's text color.
+fn svg_button(ui: &mut Ui, icon: egui::ImageSource, tooltip: &str) -> egui::Response {
+    let scale = icon_scale(ui);
+    let response = ui.add(egui::Button::new("").min_size(ICON_BUTTON * scale));
+    let color = ui.style().interact(&response).fg_stroke.color;
+    paint_icon(ui, response.rect, icon, 18.0 * scale, color);
+    response.on_hover_text(tooltip)
+}
+
+/// Draws `icon` at `size` points, centered in `rect`, in `color`.
+fn paint_icon(ui: &Ui, rect: Rect, icon: egui::ImageSource, size: f32, color: Color32) {
+    egui::Image::new(icon)
+        .tint(color)
+        .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(size)));
+}
+
+/// Buttons for following the system theme or picking dark or light, like
+/// [`egui::global_theme_preference_buttons`] but with the icons shared with xpaint.
+fn theme_buttons(ui: &mut Ui) {
+    use egui::ThemePreference;
+    let mut preference = ui.options(|o| o.theme_preference);
+    // A scope keeps the toolbar's centered row, so the buttons line up with the
+    // others at every icon size (a nested `horizontal` row is only as tall as text).
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        // Right to left, so the order on screen is System, Dark, Light.
+        for (choice, icon, tip) in [
+            (
+                ThemePreference::Light,
+                THEME_LIGHT_ICON,
+                "Use the light theme",
+            ),
+            (ThemePreference::Dark, THEME_DARK_ICON, "Use the dark theme"),
+            (
+                ThemePreference::System,
+                THEME_SYSTEM_ICON,
+                "Follow the system theme",
+            ),
+        ] {
+            let selected = preference == choice;
+            let scale = icon_scale(ui);
+            let button = egui::Button::selectable(selected, "").min_size(ICON_BUTTON * scale);
+            let response = ui.add(button);
+            // White on the selected (accent) background, like xpaint.
+            let color = if selected {
+                Color32::WHITE
+            } else {
+                ui.style()
+                    .interact_selectable(&response, false)
+                    .fg_stroke
+                    .color
+            };
+            paint_icon(ui, response.rect, icon, 16.0 * scale, color);
+            if response.on_hover_text(tip).clicked() {
+                preference = choice;
+            }
+        }
+    });
+    ui.ctx().set_theme(preference);
 }
 
 /// A fixed-size button with a centered icon glyph.
 fn icon_button(ui: &mut Ui, icon: &str, enabled: bool, tooltip: &str) -> egui::Response {
-    ui.add_enabled(enabled, icon_button_widget(icon))
-        .on_hover_text(tooltip)
+    let button = icon_button_widget(ui, icon);
+    ui.add_enabled(enabled, button).on_hover_text(tooltip)
 }
 
 /// Like [`Ui::put`], but the widget can be disabled.
@@ -1210,4 +1483,25 @@ fn fit(size: Vec2, bounds: Rect, max_scale: f32) -> Rect {
         .min(bounds.height() / size.y)
         .min(max_scale);
     Rect::from_center_size(bounds.center(), size * scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_size_scales_buttons_and_is_stored_by_name() {
+        let ctx = egui::Context::default();
+        for size in IconSize::ALL {
+            assert_eq!(IconSize::from_name(size.name()), Some(size));
+            set_icon_scale(&ctx, size.scale());
+            let mut width = 0.0;
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                width = svg_button(ui, ABOUT_ICON, "About").rect.width();
+            });
+            // No renderer to apply the texture changes to.
+            output.textures_delta.clear();
+            assert_eq!(width, ICON_BUTTON.x * size.scale());
+        }
+    }
 }

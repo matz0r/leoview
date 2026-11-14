@@ -6,6 +6,10 @@ single cross-platform binary.
 
 <p align="center"><img src="assets/screenshot.png" alt="LeoView" height="200px"></p>
 
+Open a picture and click the trash button or press **Del** to move it to the
+system recycle bin. The next picture is selected (or the previous one when
+deleting the last picture). Files can be restored from the recycle bin.
+
 ## Download
 
 Prebuilt binaries for Linux and Windows are attached to each
@@ -38,8 +42,8 @@ It stays hidden when the same build or a newer version is already installed.
 
 ### Updates
 
-The installed copy has **Check for updates once a day** in the **About**
-window, off by default. Turn it on and it checks GitHub for a newer release
+The installed copy has **Check for updates once a day** in the **Settings**
+menu, off by default. Turn it on and it checks GitHub for a newer release
 right away; after that it checks when LeoView starts, at most once every 24
 hours. If there is a newer version, **Update to x.y.z** appears in the
 toolbar: it downloads that release, installs it and reopens at the same folder
